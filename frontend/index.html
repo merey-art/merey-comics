@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<title>Guided View</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0a0a; }
+  #viewport {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: #000000;
+    touch-action: manipulation;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #page-canvas {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+  }
+  .tap-zone {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 50%;
+    z-index: 10;
+  }
+  #tap-prev { left: 0; }
+  #tap-next { right: 0; }
+  #hud {
+    position: fixed;
+    left: env(safe-area-inset-left, 0px);
+    right: env(safe-area-inset-right, 0px);
+    bottom: env(safe-area-inset-bottom, 0px);
+    z-index: 20;
+  }
+  #topbar {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    left: env(safe-area-inset-left, 0px);
+    right: env(safe-area-inset-right, 0px);
+    z-index: 20;
+  }
+  .tab-btn { color: #a3a3a3; }
+  .tab-btn.active { background: #262626; color: #ffffff; }
+  #focus-toggle {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
+    right: calc(env(safe-area-inset-right, 0px) + 8px);
+    z-index: 30;
+  }
+  body.focus-mode #viewport { background: #000000; }
+  body.focus-mode #topbar,
+  body.focus-mode #hud {
+    display: none;
+  }
+  body.focus-mode #focus-toggle {
+    opacity: 0.35;
+  }
+  body.focus-mode #focus-toggle:hover,
+  body.focus-mode #focus-toggle:active {
+    opacity: 1;
+  }
+</style>
+</head>
+<body class="text-white">
+
+<div id="setup-screen" class="fixed inset-0 z-30 flex items-center justify-center bg-neutral-950 px-6 overflow-y-auto py-10">
+  <div class="w-full max-w-sm space-y-4">
+    <h1 class="text-xl font-semibold text-center">Guided View</h1>
+
+    <div class="grid grid-cols-3 gap-1 rounded-lg bg-neutral-900 p-1 text-xs">
+      <button data-tab="api" class="tab-btn rounded-md py-2 font-medium transition">По ссылке</button>
+      <button data-tab="manual" class="tab-btn rounded-md py-2 font-medium transition">Вручную</button>
+      <button data-tab="bookmarklet" class="tab-btn rounded-md py-2 font-medium transition">Bookmarklet</button>
+    </div>
+
+    <div id="tab-api" class="tab-panel space-y-4">
+      <p class="text-sm text-neutral-400 text-center">Вставь ссылку на главу с BatCave</p>
+      <input id="chapter-url" type="url" placeholder="https://batcave.biz/reader/..."
+        class="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-400">
+      <button id="load-btn"
+        class="w-full rounded-lg bg-white text-black font-medium py-2 text-sm active:scale-95 transition">
+        Загрузить главу
+      </button>
+      <p class="text-xs text-neutral-500 text-center">Может вернуть 403, если сайт блокирует запросы с сервера (Cloudflare). Используй вкладку "Вручную" или "Bookmarklet".</p>
+    </div>
+
+    <div id="tab-manual" class="tab-panel space-y-4 hidden">
+      <p class="text-sm text-neutral-400 text-center">Вставь JSON-массив ссылок на страницы или HTML-код страницы главы</p>
+      <textarea id="manual-input" rows="8" placeholder='["https://.../1.jpg", "https://.../2.jpg"]&#10;или HTML со страницами'
+        class="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-400 font-mono"></textarea>
+      <button id="manual-load-btn"
+        class="w-full rounded-lg bg-white text-black font-medium py-2 text-sm active:scale-95 transition">
+        Загрузить
+      </button>
+    </div>
+
+    <div id="tab-bookmarklet" class="tab-panel space-y-4 hidden">
+      <p class="text-sm text-neutral-400 text-center">
+        Перетащи кнопку ниже в панель закладок браузера, открой главу на BatCave и нажми на неё —
+        откроется Guided View с найденными страницами.
+      </p>
+      <a id="bookmarklet-link" href="#"
+        class="block text-center rounded-lg bg-white text-black font-medium py-2 text-sm active:scale-95 transition select-none">
+        📖 Guided View
+      </a>
+      <p class="text-xs text-neutral-500 text-center">Либо скопируй код и создай закладку вручную:</p>
+      <textarea id="bookmarklet-code" rows="4" readonly
+        class="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-xs outline-none font-mono"></textarea>
+      <button id="bookmarklet-copy-btn"
+        class="w-full rounded-lg bg-neutral-800 text-white font-medium py-2 text-sm active:scale-95 transition">
+        Скопировать код
+      </button>
+    </div>
+
+    <p id="setup-error" class="text-sm text-red-400 text-center hidden"></p>
+    <p id="setup-status" class="text-sm text-neutral-500 text-center hidden"></p>
+  </div>
+</div>
+
+<div id="viewport" class="hidden">
+  <canvas id="page-canvas"></canvas>
+  <div id="tap-prev" class="tap-zone"></div>
+  <div id="tap-next" class="tap-zone"></div>
+</div>
+
+<button id="focus-toggle" class="hidden rounded-full bg-neutral-900/80 border border-neutral-700 w-9 h-9 flex items-center justify-center text-sm active:scale-95 transition"
+  title="Затемнять фон" aria-pressed="false">
+  🌓
+</button>
+
+<div id="topbar" class="hidden px-4 pt-3 flex items-center justify-between text-xs text-neutral-300 bg-gradient-to-b from-black/70 to-transparent pb-6">
+  <span id="page-indicator">Стр. 1/1</span>
+  <span id="panel-indicator">Кадр 1/1</span>
+</div>
+
+<div id="hud" class="hidden px-4 pb-4 pt-6 bg-gradient-to-t from-black/70 to-transparent">
+  <div class="flex items-center gap-3">
+    <div class="flex-1 h-1 rounded-full bg-neutral-800 overflow-hidden">
+      <div id="progress-bar" class="h-full bg-white transition-all duration-300" style="width:0%"></div>
+    </div>
+  </div>
+</div>
+
+<div id="loading" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/60">
+  <div class="text-sm text-neutral-300">Загрузка...</div>
+</div>
+
+<div id="reader-error" class="hidden fixed inset-x-4 top-1/2 -translate-y-1/2 z-40 rounded-lg bg-neutral-900 border border-red-500/50 px-4 py-3 text-sm text-red-300 text-center break-words"></div>
+
+<script>
+const API_BASE = "";
+
+const state = {
+  pages: [],
+  totalPages: 0,
+  pageIndex: 0,
+  panelData: null,
+  panelIndex: 0,
+  cache: new Map(),
+};
+
+const setupScreen = document.getElementById("setup-screen");
+const viewport = document.getElementById("viewport");
+const topbar = document.getElementById("topbar");
+const hud = document.getElementById("hud");
+const loading = document.getElementById("loading");
+const pageCanvas = document.getElementById("page-canvas");
+const canvasCtx = pageCanvas.getContext("2d");
+const sourceImg = new Image();
+const pageIndicator = document.getElementById("page-indicator");
+const panelIndicator = document.getElementById("panel-indicator");
+const progressBar = document.getElementById("progress-bar");
+const setupError = document.getElementById("setup-error");
+const readerError = document.getElementById("reader-error");
+const setupStatus = document.getElementById("setup-status");
+const focusToggle = document.getElementById("focus-toggle");
+
+function showLoading(show) {
+  loading.classList.toggle("hidden", !show);
+  loading.classList.toggle("flex", show);
+}
+
+function showError(msg) {
+  if (setupScreen.classList.contains("hidden")) {
+    // Reader is already active — the setup screen (and #setup-error inside
+    // it) is invisible, so surface the error as a banner over the viewport.
+    readerError.textContent = msg;
+    readerError.classList.remove("hidden");
+  } else {
+    setupError.textContent = msg;
+    setupError.classList.remove("hidden");
+  }
+}
+
+function clearError() {
+  setupError.classList.add("hidden");
+  readerError.classList.add("hidden");
+}
+
+async function parseChapter(chapterUrl) {
+  const res = await fetch(`${API_BASE}/api/parse-chapter`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chapter_url: chapterUrl }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Ошибка парсинга главы (${res.status})`);
+  }
+  return res.json();
+}
+
+async function processPage(imageUrl) {
+  if (state.cache.has(imageUrl)) {
+    return state.cache.get(imageUrl);
+  }
+  const res = await fetch(`${API_BASE}/api/process-page`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_url: imageUrl }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Ошибка обработки страницы (${res.status})`);
+  }
+  const data = await res.json();
+
+  // Append a synthetic "whole page" step at the end of the panel list —
+  // a Marvel Unlimited-style zoom-out overview before moving to the next
+  // page's first panel.
+  data.panels = [
+    ...data.panels,
+    {
+      index: data.panels.length,
+      bbox: [0, 0, data.image_width, data.image_height],
+      isFullPage: true,
+    },
+  ];
+
+  state.cache.set(imageUrl, data);
+  return data;
+}
+
+function drawCurrentPanel() {
+  const panels = state.panelData.panels;
+  const panel = panels[state.panelIndex];
+  if (!panel) return;
+
+  const [x1, y1, x2, y2] = panel.bbox;
+  const panelW = x2 - x1;
+  const panelH = y2 - y1;
+
+  // Render at native-resolution crop (scaled for the display's pixel
+  // ratio) so the panel stays sharp; CSS width/height below does the
+  // actual "contain" fit-to-viewport scaling.
+  const dpr = window.devicePixelRatio || 1;
+  pageCanvas.width = Math.max(1, Math.round(panelW * dpr));
+  pageCanvas.height = Math.max(1, Math.round(panelH * dpr));
+
+  canvasCtx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+  canvasCtx.drawImage(
+    sourceImg,
+    x1, y1, panelW, panelH,
+    0, 0, pageCanvas.width, pageCanvas.height
+  );
+
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  const scale = Math.min(vw / panelW, vh / panelH);
+  pageCanvas.style.width = `${panelW * scale}px`;
+  pageCanvas.style.height = `${panelH * scale}px`;
+
+  panelIndicator.textContent = panel.isFullPage
+    ? "Вся страница"
+    : `Кадр ${state.panelIndex + 1}/${panels.length - 1}`;
+  pageIndicator.textContent = `Стр. ${state.pageIndex + 1}/${state.pages.length}`;
+
+  const totalPanels = panels.length;
+  const pct = totalPanels > 1 ? (state.panelIndex / (totalPanels - 1)) * 100 : 100;
+  progressBar.style.width = `${pct}%`;
+}
+
+function loadImageIntoView(url) {
+  return new Promise((resolve, reject) => {
+    sourceImg.onload = null;
+    sourceImg.onerror = null;
+
+    sourceImg.onload = () => resolve();
+    sourceImg.onerror = () => reject(new Error(`Не удалось загрузить картинку страницы: ${url}`));
+
+    sourceImg.referrerPolicy = "no-referrer";
+    sourceImg.removeAttribute("crossorigin");
+    sourceImg.src = url;
+
+    // Image may already be cached/decoded by the time listeners attach.
+    if (sourceImg.complete) {
+      if (sourceImg.naturalWidth > 0) {
+        resolve();
+      } else {
+        reject(new Error(`Не удалось загрузить картинку страницы: ${url}`));
+      }
+    }
+  });
+}
+
+async function loadPage(pageIndex, panelIndex = 0) {
+  if (pageIndex < 0 || pageIndex >= state.pages.length) return;
+  clearError();
+  showLoading(true);
+  try {
+    const imageUrl = state.pages[pageIndex];
+    const data = await processPage(imageUrl);
+
+    state.pageIndex = pageIndex;
+    state.panelData = data;
+    state.panelIndex = panelIndex;
+    state.totalPages = state.pages.length;
+
+    await loadImageIntoView(data.image_url);
+
+    drawCurrentPanel();
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    showLoading(false);
+  }
+}
+
+function nextPanel() {
+  const panels = state.panelData?.panels || [];
+  if (state.panelIndex < panels.length - 1) {
+    state.panelIndex += 1;
+    drawCurrentPanel();
+  } else if (state.pageIndex < state.pages.length - 1) {
+    loadPage(state.pageIndex + 1, 0);
+  }
+}
+
+function prevPanel() {
+  if (state.panelIndex > 0) {
+    state.panelIndex -= 1;
+    drawCurrentPanel();
+  } else if (state.pageIndex > 0) {
+    loadPage(state.pageIndex - 1, -1).then(() => {
+      const panels = state.panelData?.panels || [];
+      state.panelIndex = Math.max(panels.length - 1, 0);
+      drawCurrentPanel();
+    });
+  }
+}
+
+document.getElementById("tap-next").addEventListener("click", nextPanel);
+document.getElementById("tap-prev").addEventListener("click", prevPanel);
+
+function setFocusMode(on) {
+  document.body.classList.toggle("focus-mode", on);
+  focusToggle.setAttribute("aria-pressed", String(on));
+  focusToggle.title = on ? "Показать интерфейс" : "Затемнять фон";
+}
+
+focusToggle.addEventListener("click", () => {
+  setFocusMode(!document.body.classList.contains("focus-mode"));
+});
+
+document.addEventListener("keydown", (e) => {
+  if (setupScreen.classList.contains("hidden") === false) return;
+  if (e.key === "ArrowRight") nextPanel();
+  if (e.key === "ArrowLeft") prevPanel();
+});
+
+window.addEventListener("resize", () => {
+  if (state.panelData) drawCurrentPanel();
+});
+
+function extractPagesFromManualInput(text) {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("Пустой ввод");
+
+  // Try JSON array of URLs first.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      const urls = parsed.filter((u) => typeof u === "string" && u.length > 0);
+      if (urls.length) return urls;
+    }
+  } catch (_) {
+    // Not JSON, fall through to HTML parsing.
+  }
+
+  const doc = new DOMParser().parseFromString(trimmed, "text/html");
+  let imgs = Array.from(
+    doc.querySelectorAll("img.reader__item, img.reader__item.lazy, .reader__item_wrap img")
+  );
+  if (imgs.length === 0) {
+    imgs = Array.from(doc.querySelectorAll("img"));
+  }
+
+  const urls = imgs
+    .map((img) =>
+      img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("data-original")
+    )
+    .filter((s) => s && !s.includes("avatar") && !s.includes("logo"));
+
+  const unique = [...new Set(urls)];
+  if (!unique.length) throw new Error("Не удалось найти ссылки на страницы во введённом тексте");
+  return unique;
+}
+
+async function startReader(pages) {
+  if (!pages || !pages.length) throw new Error("Список страниц пуст");
+
+  state.pages = pages;
+  state.totalPages = pages.length;
+
+  setupScreen.classList.add("hidden");
+  viewport.classList.remove("hidden");
+  topbar.classList.remove("hidden");
+  hud.classList.remove("hidden");
+  focusToggle.classList.remove("hidden");
+
+  await loadPage(0, 0);
+}
+
+function initTabs() {
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  const tabPanels = {
+    api: document.getElementById("tab-api"),
+    manual: document.getElementById("tab-manual"),
+    bookmarklet: document.getElementById("tab-bookmarklet"),
+  };
+
+  function activate(tabName) {
+    tabButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tabName));
+    Object.entries(tabPanels).forEach(([name, el]) => el.classList.toggle("hidden", name !== tabName));
+  }
+
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => activate(btn.dataset.tab));
+  });
+
+  activate("api");
+}
+
+function initBookmarklet() {
+  const appOrigin = window.location.origin;
+  const code = `javascript:(function(){const appOrigin='${appOrigin}';let urls=[];try{const root=document.querySelector('.reader-root');const comp=root&&(root._vnode&&root._vnode.component);const imgs=comp&&comp.data&&comp.data.data&&comp.data.data.images;if(Array.isArray(imgs)&&imgs.length)urls=imgs.slice();}catch(e){}if(!urls.length){const selectOpts=Array.from(document.querySelectorAll('select option, .reader__select option'));selectOpts.forEach(o=>{const v=o.value||o.getAttribute('data-src');if(v&&v.includes('img.batcave.biz'))urls.push(v);});}if(!urls.length){for(let k in window){try{const v=window[k];if(Array.isArray(v)&&v.length>10&&typeof v[0]==='string'&&v[0].includes('img.batcave.biz')){urls=v;break;}}catch(e){}}}if(!urls.length){const scripts=Array.from(document.querySelectorAll('script')).map(s=>s.textContent).join('\\n');const matches=scripts.match(/https:\\/\\/img\\.batcave\\.biz\\/img\\/[^"'\\s]+/g);if(matches)urls=matches;}if(!urls.length){urls=Array.from(document.querySelectorAll('img.reader__item, .reader__item_wrap img')).map(i=>i.getAttribute('src')||i.getAttribute('data-src')||i.getAttribute('data-original')).filter(Boolean);}const unique=[...new Set(urls)].filter(u=>u.includes('img.batcave.biz'));if(unique.length){window.open(appOrigin+'/?pages='+encodeURIComponent(JSON.stringify(unique)),'_blank');}else{alert('Найдено страниц: '+unique.length+'. Проверь, открыта ли страница ридера.');}})();`;
+
+  const link = document.getElementById("bookmarklet-link");
+  link.href = code;
+
+  const codeBox = document.getElementById("bookmarklet-code");
+  codeBox.value = code;
+
+  document.getElementById("bookmarklet-copy-btn").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      const btn = document.getElementById("bookmarklet-copy-btn");
+      const original = btn.textContent;
+      btn.textContent = "Скопировано!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    } catch (_) {
+      codeBox.select();
+    }
+  });
+}
+
+document.getElementById("load-btn").addEventListener("click", async () => {
+  const url = document.getElementById("chapter-url").value.trim();
+  if (!url) return;
+
+  setupError.classList.add("hidden");
+  setupStatus.classList.remove("hidden");
+  setupStatus.textContent = "Парсим главу...";
+
+  try {
+    const chapter = await parseChapter(url);
+    setupStatus.textContent = `Найдено страниц: ${chapter.page_count}. Загружаем первую...`;
+    await startReader(chapter.pages);
+  } catch (err) {
+    setupStatus.classList.add("hidden");
+    showError(err.message);
+  }
+});
+
+document.getElementById("manual-load-btn").addEventListener("click", async () => {
+  const text = document.getElementById("manual-input").value;
+
+  setupError.classList.add("hidden");
+  setupStatus.classList.remove("hidden");
+  setupStatus.textContent = "Обрабатываем ввод...";
+
+  try {
+    const pages = extractPagesFromManualInput(text);
+    setupStatus.textContent = `Найдено страниц: ${pages.length}. Загружаем первую...`;
+    await startReader(pages);
+  } catch (err) {
+    setupStatus.classList.add("hidden");
+    showError(err.message);
+  }
+});
+
+async function initFromUrlParams() {
+  const params = new URLSearchParams(window.location.search);
+  const pagesParam = params.get("pages");
+  if (!pagesParam) return false;
+
+  try {
+    const pages = JSON.parse(pagesParam);
+    if (!Array.isArray(pages) || !pages.length) throw new Error("Параметр pages пуст или некорректен");
+    await startReader(pages);
+    return true;
+  } catch (err) {
+    showError(`Ошибка чтения ?pages=: ${err.message}`);
+    return false;
+  }
+}
+
+initTabs();
+initBookmarklet();
+initFromUrlParams();
+</script>
+</body>
+</html>
