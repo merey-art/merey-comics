@@ -1,117 +1,83 @@
 #!/usr/bin/env python3
+"""Comic panel detection CLI.
+
+Detects panels with a YOLO model fine-tuned for comic pages
+(mosesb/best-comic-panel-detection), falling back to the Canny/morphology
+CV heuristic (panel_detection_cv2.py) when the model is unavailable or
+finds nothing, and to a single full-page box as the last resort.
+"""
 import argparse
 import json
 import sys
+import urllib.request
 from pathlib import Path
 
 import cv2
-import numpy as np
-from ultralytics import YOLO
 
-ROW_Y_OVERLAP_THRESHOLD = 0.5
+from panel_detection_cv2 import detect_panel_boxes, sort_reading_order, build_panel_json, build_frontend_response
 
-
-def load_model(weights_path: str) -> YOLO:
-    return YOLO(weights_path)
-
-
-def run_inference(model: YOLO, image_path: str, conf: float = 0.25, imgsz: int = 1280):
-    results = model.predict(source=image_path, conf=conf, imgsz=imgsz, verbose=False)
-    return results[0]
+MODEL_URL = "https://huggingface.co/mosesb/best-comic-panel-detection/resolve/main/best.pt"
+DEFAULT_WEIGHTS = Path(__file__).resolve().parent / "backend" / "models" / "comic_panel_yolov12x.pt"
+CONF_THRESHOLD = 0.35
+IOU_THRESHOLD = 0.5
+IMG_SIZE = 1280
 
 
-def extract_boxes(result) -> list[list[float]]:
-    boxes = []
-    if result.boxes is None:
-        return boxes
-    for xyxy in result.boxes.xyxy.cpu().numpy():
-        x1, y1, x2, y2 = [float(v) for v in xyxy]
-        boxes.append([x1, y1, x2, y2])
-    return boxes
+def ensure_weights(weights_path: Path) -> bool:
+    if weights_path.exists():
+        return True
+    try:
+        weights_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = weights_path.with_suffix(".pt.download")
+        print(f"Downloading panel-detection weights to {weights_path}...", file=sys.stderr)
+        urllib.request.urlretrieve(MODEL_URL, tmp_path)
+        tmp_path.rename(weights_path)
+        return True
+    except Exception as exc:
+        print(f"Warning: could not download weights ({exc})", file=sys.stderr)
+        return False
 
 
-def sort_reading_order(boxes: list[list[float]]) -> list[list[float]]:
-    if not boxes:
+def detect_panels_yolo(
+    image, weights_path: Path, conf: float = CONF_THRESHOLD, iou: float = IOU_THRESHOLD
+) -> list[list[float]]:
+    if not ensure_weights(weights_path):
+        return []
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        print("Warning: ultralytics not installed, falling back to CV detection", file=sys.stderr)
         return []
 
-    items = [{"bbox": b, "cy": (b[1] + b[3]) / 2, "h": b[3] - b[1]} for b in boxes]
-    items.sort(key=lambda it: it["cy"])
+    model = YOLO(str(weights_path))
+    results = model.predict(source=image, conf=conf, iou=iou, imgsz=IMG_SIZE, verbose=False)
+    result = results[0]
+    if result.boxes is None or len(result.boxes) == 0:
+        return []
 
-    rows: list[list[dict]] = []
-    for item in items:
-        placed = False
-        for row in rows:
-            ref = row[0]
-            overlap = min(item["h"], ref["h"]) * ROW_Y_OVERLAP_THRESHOLD
-            if abs(item["cy"] - ref["cy"]) < overlap:
-                row.append(item)
-                placed = True
-                break
-        if not placed:
-            rows.append([item])
-
-    rows.sort(key=lambda row: min(it["bbox"][1] for it in row))
-
-    ordered = []
-    for row in rows:
-        row.sort(key=lambda it: it["bbox"][0])
-        ordered.extend(it["bbox"] for it in row)
-    return ordered
+    boxes = [[float(v) for v in xyxy] for xyxy in result.boxes.xyxy.cpu().numpy()]
+    return sort_reading_order(boxes)
 
 
-def build_panel_json(boxes: list[list[float]], image_shape: tuple[int, int]) -> dict:
-    height, width = image_shape
-    panels = []
-    for idx, (x1, y1, x2, y2) in enumerate(boxes):
-        panels.append({
-            "index": idx,
-            "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
-        })
-    return {"image_width": width, "image_height": height, "panels": panels}
-
-
-def build_frontend_response(panel_json: dict) -> dict:
-    width = panel_json["image_width"]
-    height = panel_json["image_height"]
-    panels = []
-    for panel in panel_json["panels"]:
-        x1, y1, x2, y2 = panel["bbox"]
-        w = x2 - x1
-        h = y2 - y1
-        panels.append({
-            "index": panel["index"],
-            "bbox": panel["bbox"],
-            "crop": {"x": x1, "y": y1, "width": w, "height": h},
-            "style": {
-                "left": f"{(x1 / width) * 100:.4f}%",
-                "top": f"{(y1 / height) * 100:.4f}%",
-                "width": f"{(w / width) * 100:.4f}%",
-                "height": f"{(h / height) * 100:.4f}%",
-                "transform": f"translate(-{x1}px, -{y1}px)",
-            },
-        })
-    return {"image_width": width, "image_height": height, "panels": panels}
-
-
-def detect_panels(image_path: str, weights_path: str = "yolov8n.pt", conf: float = 0.25) -> dict:
+def detect_panels(image_path: str, weights_path: str = str(DEFAULT_WEIGHTS), conf: float = CONF_THRESHOLD) -> dict:
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
     height, width = image.shape[:2]
 
-    model = load_model(weights_path)
-    result = run_inference(model, image_path, conf=conf)
-    boxes = extract_boxes(result)
-    ordered_boxes = sort_reading_order(boxes)
+    ordered_boxes = detect_panels_yolo(image, Path(weights_path), conf=conf)
+    if not ordered_boxes:
+        # Covers both the CV fallback and, inside it, the full-page fallback.
+        ordered_boxes = detect_panel_boxes(image)
 
     return build_panel_json(ordered_boxes, (height, width))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Comic panel detection with YOLOv8")
+    parser = argparse.ArgumentParser(description="Comic panel detection (YOLO, with CV fallback)")
     parser.add_argument("image", help="Path to comic page image")
-    parser.add_argument("--weights", default="yolov8n.pt", help="Path to model weights (.pt or .onnx)")
-    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--weights", default=str(DEFAULT_WEIGHTS), help="Path to YOLO model weights (.pt)")
+    parser.add_argument("--conf", type=float, default=CONF_THRESHOLD, help="Confidence threshold")
     parser.add_argument("--output", default=None, help="Path to write JSON output")
     parser.add_argument("--frontend", action="store_true", help="Emit frontend-ready crop/CSS transform payload")
     args = parser.parse_args()

@@ -14,11 +14,8 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 
-from panel_detection_cv2 import (
-    build_frontend_response,
-    build_panel_json,
-    detect_panel_boxes,
-)
+from panel_detection_cv2 import build_frontend_response, build_panel_json
+from panel_detection_yolo import detect_panels as detect_panel_boxes
 
 REQUEST_HEADERS = {
     "User-Agent": (
