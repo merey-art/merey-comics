@@ -233,15 +233,20 @@ async function processPage(imageUrl) {
 
   // Append a synthetic "whole page" step at the end of the panel list —
   // a Marvel Unlimited-style zoom-out overview before moving to the next
-  // page's first panel.
-  data.panels = [
-    ...data.panels,
-    {
-      index: data.panels.length,
-      bbox: [0, 0, data.image_width, data.image_height],
-      isFullPage: true,
-    },
-  ];
+  // page's first panel. Skipped when the page only has one panel to begin
+  // with (a full-page fallback, or a genuine single-panel splash): that
+  // panel already IS the whole page, so the overview would just repeat
+  // the same view twice in a row.
+  if (data.panels.length > 1) {
+    data.panels = [
+      ...data.panels,
+      {
+        index: data.panels.length,
+        bbox: [0, 0, data.image_width, data.image_height],
+        isFullPage: true,
+      },
+    ];
+  }
 
   state.cache.set(imageUrl, data);
   return data;

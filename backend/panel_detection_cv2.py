@@ -18,6 +18,14 @@ MIN_GUTTER_SPAN_RATIO = 0.002
 MAX_REASONABLE_PANELS = 12
 BUBBLE_MEAN_THRESHOLD = 225.0
 BUBBLE_STD_THRESHOLD = 18.0
+# A detector box that stops short of the page edge is either a real
+# margin/border (blank strip between the art and the edge) or a
+# full-bleed panel whose box the model just didn't extend all the way.
+# Tiny gaps are snapped unconditionally (measurement noise); bigger ones
+# are only snapped when the strip between the box and the edge actually
+# has art in it, judged with the same blank/bubble heuristic used
+# elsewhere (high mean, low std == blank).
+EDGE_AUTO_SNAP_RATIO = 0.03
 
 
 def preprocess(image: np.ndarray) -> np.ndarray:
@@ -239,6 +247,80 @@ def merge_overlapping_boxes(
     return merged
 
 
+def _rects_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return max(ax1, bx1) < min(ax2, bx2) and max(ay1, by1) < min(ay2, by2)
+
+
+def _has_neighbor_in_gap(
+    boxes: list[list[float]], index: int, gap: tuple[float, float, float, float]
+) -> bool:
+    """True if some other box overlaps the rectangular gap between this
+    box and the page edge — i.e. the gap isn't empty page margin, another
+    panel is (at least partly) sitting in it. `boxes` must be the
+    original (unmutated) detections — reusing a list whose earlier
+    entries were already snapped this pass would shift where their
+    boundaries actually are."""
+    for j, other in enumerate(boxes):
+        if j == index:
+            continue
+        if _rects_overlap(tuple(other), gap):
+            return True
+    return False
+
+
+def _strip_is_blank(image: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> bool:
+    xi1, yi1, xi2, yi2 = int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
+    if xi2 <= xi1 or yi2 <= yi1:
+        return True
+    strip = image[yi1:yi2, xi1:xi2]
+    if strip.size == 0:
+        return True
+    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY) if strip.ndim == 3 else strip
+    return gray.mean() > BUBBLE_MEAN_THRESHOLD and gray.std() < BUBBLE_STD_THRESHOLD
+
+
+def snap_full_bleed_edges(
+    boxes: list[list[float]], image: np.ndarray
+) -> list[list[float]]:
+    """Extend a box's edge to the page boundary when the gap is either
+    tiny (model measurement noise) or clearly full-bleed artwork rather
+    than a blank margin — and only when nothing else (a neighboring
+    panel) already occupies that gap."""
+    if not boxes:
+        return boxes
+
+    height, width = image.shape[:2]
+    original = [tuple(b) for b in boxes]
+    snapped = [list(b) for b in boxes]
+
+    for i, box in enumerate(snapped):
+        x1, y1, x2, y2 = original[i]
+
+        gap = (0.0, y1, x1, y2)
+        if x1 > 0 and not _has_neighbor_in_gap(original, i, gap):
+            if x1 / width <= EDGE_AUTO_SNAP_RATIO or not _strip_is_blank(image, *gap):
+                box[0] = 0.0
+
+        gap = (x1, 0.0, x2, y1)
+        if y1 > 0 and not _has_neighbor_in_gap(original, i, gap):
+            if y1 / height <= EDGE_AUTO_SNAP_RATIO or not _strip_is_blank(image, *gap):
+                box[1] = 0.0
+
+        gap = (x2, y1, float(width), y2)
+        if x2 < width and not _has_neighbor_in_gap(original, i, gap):
+            if (width - x2) / width <= EDGE_AUTO_SNAP_RATIO or not _strip_is_blank(image, *gap):
+                box[2] = float(width)
+
+        gap = (x1, y2, x2, float(height))
+        if y2 < height and not _has_neighbor_in_gap(original, i, gap):
+            if (height - y2) / height <= EDGE_AUTO_SNAP_RATIO or not _strip_is_blank(image, *gap):
+                box[3] = float(height)
+
+    return snapped
+
+
 def sort_reading_order(boxes: list[list[float]]) -> list[list[float]]:
     if not boxes:
         return []
@@ -330,6 +412,7 @@ def detect_panel_boxes(image: np.ndarray) -> list[list[float]]:
     if len(boxes) < MIN_PANELS_FOR_FALLBACK:
         return [[0.0, 0.0, float(width), float(height)]]
 
+    boxes = snap_full_bleed_edges(boxes, image)
     return sort_reading_order(boxes)
 
 
