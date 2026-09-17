@@ -17,6 +17,7 @@ from panel_detection_cv2 import (
     MIN_AREA_RATIO,
     _box_area,
     _intersection_area,
+    _is_blank_or_bubble,
     detect_panel_boxes,
     snap_full_bleed_edges,
     sort_reading_order,
@@ -118,6 +119,16 @@ def _drop_sliver_boxes(
     return kept
 
 
+def _drop_blank_boxes(
+    detections: list[tuple[list[float], float]], image: np.ndarray
+) -> list[tuple[list[float], float]]:
+    """Reject boxes that are just flat/blank page margin — the model
+    sometimes fires on empty space (e.g. below the last row of panels)
+    since it isn't trained to abstain there the way the CV contour pass
+    does via _is_blank_or_bubble()."""
+    return [(box, score) for box, score in detections if not _is_blank_or_bubble(image, box)]
+
+
 def _drop_contained_duplicates(
     detections: list[tuple[list[float], float]]
 ) -> list[tuple[list[float], float]]:
@@ -172,6 +183,7 @@ def detect_panels_yolo(
         [float(c) for c in result.boxes.conf.cpu().numpy()],
     ))
     detections = _drop_sliver_boxes(detections, image.shape[:2])
+    detections = _drop_blank_boxes(detections, image)
     detections = _drop_contained_duplicates(detections)
     boxes = [box for box, _score in detections]
     boxes = snap_full_bleed_edges(boxes, image)

@@ -18,6 +18,14 @@ MIN_GUTTER_SPAN_RATIO = 0.002
 MAX_REASONABLE_PANELS = 12
 BUBBLE_MEAN_THRESHOLD = 225.0
 BUBBLE_STD_THRESHOLD = 18.0
+# Global mean/std over the whole box is fooled by a box that's almost
+# entirely blank margin but grazes a thin border line from a neighboring
+# panel (e.g. one row of a panel's bottom edge) — that line alone pushes
+# std well past BUBBLE_STD_THRESHOLD even though the box has no real
+# content. Edge *density* (fraction of Canny-edge pixels) isn't: a stray
+# border line is a tiny fraction of the box's area, while real panel
+# content (line art, shading, text) covers a large share of it.
+BUBBLE_EDGE_DENSITY_THRESHOLD = 0.05
 # A detector box that stops short of the page edge is either a real
 # margin/border (blank strip between the art and the edge) or a
 # full-bleed panel whose box the model just didn't extend all the way.
@@ -80,7 +88,12 @@ def _is_blank_or_bubble(image: np.ndarray, box: list[float]) -> bool:
         return True
     gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 else region
     mean, std = float(gray_region.mean()), float(gray_region.std())
-    return mean > BUBBLE_MEAN_THRESHOLD and std < BUBBLE_STD_THRESHOLD
+    if mean <= BUBBLE_MEAN_THRESHOLD:
+        return False
+    if std < BUBBLE_STD_THRESHOLD:
+        return True
+    edge_density = float((cv2.Canny(gray_region, 50, 150) > 0).mean())
+    return edge_density < BUBBLE_EDGE_DENSITY_THRESHOLD
 
 
 def find_panel_contours(
