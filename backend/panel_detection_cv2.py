@@ -266,19 +266,32 @@ def _rects_overlap(a: tuple[float, float, float, float], b: tuple[float, float, 
     return max(ax1, bx1) < min(ax2, bx2) and max(ay1, by1) < min(ay2, by2)
 
 
+NEIGHBOR_GAP_COVERAGE_THRESHOLD = 0.85
+
+
+MIN_NEIGHBOR_GAP_OVERLAP_RATIO = 0.05
+
+
 def _has_neighbor_in_gap(
     boxes: list[list[float]], index: int, gap: tuple[float, float, float, float]
 ) -> bool:
-    """True if some other box overlaps the rectangular gap between this
-    box and the page edge — i.e. the gap isn't empty page margin, another
-    panel is (at least partly) sitting in it. `boxes` must be the
-    original (unmutated) detections — reusing a list whose earlier
-    entries were already snapped this pass would shift where their
-    boundaries actually are."""
+    """True if some other box overlaps a real share of the rectangular
+    gap between this box and the page edge — i.e. the gap isn't empty
+    page margin, another panel is (at least partly) sitting in it. A
+    sliver overlap of a percent or two (two boxes from different rows
+    just grazing each other at a corner, well within detector jitter)
+    doesn't count — that's not "another panel occupies this gap", and
+    treating it as if it did leaves a genuinely full-bleed edge un-snapped
+    over noise. `boxes` must be the original (unmutated) detections —
+    reusing a list whose earlier entries were already snapped this pass
+    would shift where their boundaries actually are."""
+    gap_area = _box_area(list(gap))
+    if gap_area == 0:
+        return False
     for j, other in enumerate(boxes):
         if j == index:
             continue
-        if _rects_overlap(tuple(other), gap):
+        if _intersection_area(list(other), list(gap)) / gap_area >= MIN_NEIGHBOR_GAP_OVERLAP_RATIO:
             return True
     return False
 
@@ -294,13 +307,116 @@ def _strip_is_blank(image: np.ndarray, x1: float, y1: float, x2: float, y2: floa
     return gray.mean() > BUBBLE_MEAN_THRESHOLD and gray.std() < BUBBLE_STD_THRESHOLD
 
 
+def _gap_coverage_mask(
+    boxes: list[list[float]], index: int, gap: tuple[float, float, float, float]
+) -> np.ndarray | None:
+    """Boolean grid over `gap` (True = pixel sits inside some other box).
+    None if the gap has no area."""
+    x1, y1, x2, y2 = gap
+    xi1, yi1, xi2, yi2 = int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
+    if xi2 <= xi1 or yi2 <= yi1:
+        return None
+    covered = np.zeros((yi2 - yi1, xi2 - xi1), dtype=bool)
+    for j, other in enumerate(boxes):
+        if j == index:
+            continue
+        ox1, oy1, ox2, oy2 = other
+        ix1 = max(xi1, int(round(ox1)))
+        iy1 = max(yi1, int(round(oy1)))
+        ix2 = min(xi2, int(round(ox2)))
+        iy2 = min(yi2, int(round(oy2)))
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        covered[iy1 - yi1 : iy2 - yi1, ix1 - xi1 : ix2 - xi1] = True
+    return covered
+
+
+SAME_ROW_OVERLAP_RATIO = 0.5
+
+
+def _gap_partially_covered_but_bleeding(
+    image: np.ndarray,
+    boxes: list[list[float]],
+    index: int,
+    gap: tuple[float, float, float, float],
+    own_range: tuple[float, float],
+) -> bool:
+    """True if a same-row neighbor only grazes part of `gap` (e.g. a
+    smaller inset panel framed inside a wider full-bleed one) and the
+    part of the gap it *doesn't* cover has real bleeding content — a
+    speech bubble that escapes the inset's own box, say — rather than
+    blank margin.
+
+    `gap` is a horizontal (left/right) gap, so `own_range` is this box's
+    own (y1, y2): a neighbor only counts as the "same row" (as opposed to
+    a different row's panel that merely grazes the gap's corner) when it
+    shares a real chunk of that vertical extent. Without this check, a
+    neighboring row's own under-detected panel — one whose edge hasn't
+    reached its true extent yet — reads as "content this box should
+    bleed into," pulling that other row into this box's crop instead.
+
+    Only meaningful as a second pass, run after obvious full-bleed edges
+    have already been snapped by `_has_neighbor_in_gap` / `_strip_is_blank`
+    (pass one): `boxes` must be that pass's *output*, not the raw
+    detections, otherwise a neighbor that itself hasn't been snapped to
+    its own true (further) edge yet reads as covering less of the gap
+    than it actually does — which misattributes that neighbor's own
+    unclaimed content to this box instead."""
+    oy1, oy2 = own_range
+    own_height = oy2 - oy1
+    if own_height <= 0:
+        return False
+
+    has_same_row_neighbor = False
+    for j, other in enumerate(boxes):
+        if j == index:
+            continue
+        _, ny1, _, ny2 = other
+        overlap = max(0.0, min(oy2, ny2) - max(oy1, ny1))
+        if overlap / own_height >= SAME_ROW_OVERLAP_RATIO and _rects_overlap(tuple(other), gap):
+            has_same_row_neighbor = True
+            break
+    if not has_same_row_neighbor:
+        return False
+
+    mask = _gap_coverage_mask(boxes, index, gap)
+    if mask is None:
+        return False
+    covered_fraction = float(mask.mean())
+    if covered_fraction == 0.0 or covered_fraction >= NEIGHBOR_GAP_COVERAGE_THRESHOLD:
+        # No neighbor at all (pass one already handled it) or a neighbor
+        # that occupies nearly the whole gap (two side-by-side panels of
+        # similar size) — neither case is this pass's job.
+        return False
+
+    x1, y1, x2, y2 = gap
+    xi1, yi1, xi2, yi2 = int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
+    strip = image[yi1:yi2, xi1:xi2]
+    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY) if strip.ndim == 3 else strip
+    uncovered = gray[~mask]
+    if uncovered.size == 0:
+        return False
+    is_blank = uncovered.mean() > BUBBLE_MEAN_THRESHOLD and uncovered.std() < BUBBLE_STD_THRESHOLD
+    return not is_blank
+
+
 def snap_full_bleed_edges(
     boxes: list[list[float]], image: np.ndarray
 ) -> list[list[float]]:
     """Extend a box's edge to the page boundary when the gap is either
     tiny (model measurement noise) or clearly full-bleed artwork rather
     than a blank margin — and only when nothing else (a neighboring
-    panel) already occupies that gap."""
+    panel) already occupies that gap.
+
+    Runs in two passes. Pass one only ever snaps an edge that's either
+    unclaimed by any neighbor or fully blank margin, using the raw
+    detections throughout — conservative, but exactly this leaves an
+    edge un-snapped when a *smaller* neighbor (e.g. a framed inset panel)
+    only grazes part of the gap, even where the ungrazed part is real
+    bleeding content (a speech bubble escaping the inset's box). Pass two
+    catches that case, using pass one's output so a neighbor that itself
+    got snapped further out in pass one is measured at its true extent
+    rather than its raw, possibly-too-narrow detection."""
     if not boxes:
         return boxes
 
@@ -330,6 +446,32 @@ def snap_full_bleed_edges(
         if y2 < height and not _has_neighbor_in_gap(original, i, gap):
             if (height - y2) / height <= EDGE_AUTO_SNAP_RATIO or not _strip_is_blank(image, *gap):
                 box[3] = float(height)
+
+    pass_one = [tuple(b) for b in snapped]
+
+    for i, box in enumerate(snapped):
+        x1, y1, x2, y2 = pass_one[i]
+
+        # Left/right only: a neighbor that only grazes part of a
+        # *horizontal* gap is reliably "same row" when it shares real
+        # vertical extent with this box (a smaller inset panel framed
+        # inside a wider full-bleed one, say) — that shared extent is
+        # exactly what distinguishes it from an unrelated panel in a
+        # different row that merely happens to graze the gap's corner.
+        # Top/bottom gaps don't have an equivalent signal: a genuinely
+        # different *row* is normally column-aligned with this box, so
+        # the same "shares extent" test can't tell it apart from a
+        # same-row inset there, and applying this pass to top/bottom
+        # edges pulls neighboring rows' content into this box's crop.
+        if x1 > 0:
+            gap = (0.0, y1, x1, y2)
+            if _gap_partially_covered_but_bleeding(image, pass_one, i, gap, own_range=(y1, y2)):
+                box[0] = 0.0
+
+        if x2 < width:
+            gap = (x2, y1, float(width), y2)
+            if _gap_partially_covered_but_bleeding(image, pass_one, i, gap, own_range=(y1, y2)):
+                box[2] = float(width)
 
     return snapped
 
