@@ -47,24 +47,6 @@
   }
   .tab-btn { color: #a3a3a3; }
   .tab-btn.active { background: #262626; color: #ffffff; }
-  #focus-toggle {
-    position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 8px);
-    right: calc(env(safe-area-inset-right, 0px) + 8px);
-    z-index: 30;
-  }
-  body.focus-mode #viewport { background: #000000; }
-  body.focus-mode #topbar,
-  body.focus-mode #hud {
-    display: none;
-  }
-  body.focus-mode #focus-toggle {
-    opacity: 0.35;
-  }
-  body.focus-mode #focus-toggle:hover,
-  body.focus-mode #focus-toggle:active {
-    opacity: 1;
-  }
 </style>
 </head>
 <body class="text-white">
@@ -129,11 +111,6 @@
   <div id="tap-next" class="tap-zone"></div>
 </div>
 
-<button id="focus-toggle" class="hidden rounded-full bg-neutral-900/80 border border-neutral-700 w-9 h-9 flex items-center justify-center text-sm active:scale-95 transition"
-  title="Затемнять фон" aria-pressed="false">
-  🌓
-</button>
-
 <div id="topbar" class="hidden px-4 pt-3 flex items-center justify-between text-xs text-neutral-300 bg-gradient-to-b from-black/70 to-transparent pb-6">
   <span id="page-indicator">Стр. 1/1</span>
   <span id="panel-indicator">Кадр 1/1</span>
@@ -179,7 +156,6 @@ const progressBar = document.getElementById("progress-bar");
 const setupError = document.getElementById("setup-error");
 const readerError = document.getElementById("reader-error");
 const setupStatus = document.getElementById("setup-status");
-const focusToggle = document.getElementById("focus-toggle");
 
 function showLoading(show) {
   loading.classList.toggle("hidden", !show);
@@ -363,16 +339,6 @@ function prevPanel() {
 document.getElementById("tap-next").addEventListener("click", nextPanel);
 document.getElementById("tap-prev").addEventListener("click", prevPanel);
 
-function setFocusMode(on) {
-  document.body.classList.toggle("focus-mode", on);
-  focusToggle.setAttribute("aria-pressed", String(on));
-  focusToggle.title = on ? "Показать интерфейс" : "Затемнять фон";
-}
-
-focusToggle.addEventListener("click", () => {
-  setFocusMode(!document.body.classList.contains("focus-mode"));
-});
-
 document.addEventListener("keydown", (e) => {
   if (setupScreen.classList.contains("hidden") === false) return;
   if (e.key === "ArrowRight") nextPanel();
@@ -427,7 +393,6 @@ async function startReader(pages) {
   viewport.classList.remove("hidden");
   topbar.classList.remove("hidden");
   hud.classList.remove("hidden");
-  focusToggle.classList.remove("hidden");
 
   await loadPage(0, 0);
 }
