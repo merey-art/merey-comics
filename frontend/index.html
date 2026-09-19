@@ -64,20 +64,20 @@
     </div>
 
     <div class="grid grid-cols-3 gap-1 rounded-lg bg-neutral-900 p-1 text-xs">
-      <button data-tab="api" class="tab-btn rounded-md py-2 font-medium transition">По ссылке</button>
+      <button data-tab="api" class="tab-btn rounded-md py-2 font-medium transition">По ссылке (unicomics)</button>
       <button data-tab="manual" class="tab-btn rounded-md py-2 font-medium transition">Вручную</button>
-      <button data-tab="bookmarklet" class="tab-btn rounded-md py-2 font-medium transition">Bookmarklet</button>
+      <button data-tab="bookmarklet" class="tab-btn rounded-md py-2 font-medium transition">Bookmarklet (Batcave.biz)</button>
     </div>
 
     <div id="tab-api" class="tab-panel space-y-4">
-      <p class="text-sm text-neutral-400 text-center">Вставь ссылку на главу с BatCave</p>
-      <input id="chapter-url" type="url" placeholder="https://batcave.biz/reader/..."
+      <p class="text-sm text-neutral-400 text-center">Вставь ссылку на выпуск с unicomics.ru</p>
+      <input id="chapter-url" type="url" placeholder="https://unicomics.ru/comics/online/..."
         class="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-400">
       <button id="load-btn"
         class="w-full rounded-lg bg-white text-black font-medium py-2 text-sm active:scale-95 transition">
         Загрузить главу
       </button>
-      <p class="text-xs text-neutral-500 text-center">Может вернуть 403, если сайт блокирует запросы с сервера (Cloudflare). Используй вкладку "Вручную" или "Bookmarklet".</p>
+      <p class="text-xs text-neutral-500 text-center">Для BatCave используй вкладку Bookmarklet: сайт блокирует запросы с сервера.</p>
     </div>
 
     <div id="tab-manual" class="tab-panel space-y-4 hidden">
@@ -191,6 +191,7 @@ function saveProgress() {
     key: meta.url || state.pages[0],
     title: meta.title,
     url: meta.url,
+    nextUrl: meta.nextUrl,
     pages: state.pages,
     page: state.pageIndex,
     ts: Date.now(),
@@ -238,7 +239,11 @@ function renderHistory() {
 async function openEntry(entry) {
   setupError.classList.add("hidden");
   try {
-    await startReader(entry.pages, { title: entry.title, url: entry.url }, entry.page);
+    await startReader(
+      entry.pages,
+      { title: entry.title, url: entry.url, nextUrl: entry.nextUrl },
+      entry.page
+    );
   } catch (err) {
     showError(err.message);
   }
@@ -408,6 +413,8 @@ function nextPanel() {
     drawCurrentPanel();
   } else if (state.pageIndex < state.pages.length - 1) {
     loadPage(state.pageIndex + 1, 0);
+  } else if (state.meta?.nextUrl) {
+    loadChapterByUrl(state.meta.nextUrl);
   }
 }
 
@@ -474,7 +481,11 @@ function extractPagesFromManualInput(text) {
 async function startReader(pages, meta = null, startPage = 0) {
   if (!pages || !pages.length) throw new Error("Список страниц пуст");
 
-  state.meta = meta && { title: meta.title || "Без названия", url: meta.url || "" };
+  state.meta = meta && {
+    title: meta.title || "Без названия",
+    url: meta.url || "",
+    nextUrl: meta.nextUrl || "",
+  };
   state.pages = pages;
   state.totalPages = pages.length;
 
@@ -529,22 +540,32 @@ function initBookmarklet() {
   });
 }
 
-document.getElementById("load-btn").addEventListener("click", async () => {
-  const url = document.getElementById("chapter-url").value.trim();
-  if (!url) return;
-
+async function loadChapterByUrl(url) {
   setupError.classList.add("hidden");
   setupStatus.classList.remove("hidden");
   setupStatus.textContent = "Парсим главу...";
+  showLoading(true);
 
   try {
     const chapter = await parseChapter(url);
     setupStatus.textContent = `Найдено страниц: ${chapter.page_count}. Загружаем первую...`;
-    await startReader(chapter.pages);
+    const saved = readHistory().find((e) => e.key === url);
+    await startReader(
+      chapter.pages,
+      { title: chapter.title, url, nextUrl: chapter.next_url },
+      saved ? saved.page : 0
+    );
   } catch (err) {
     setupStatus.classList.add("hidden");
     showError(err.message);
+  } finally {
+    showLoading(false);
   }
+}
+
+document.getElementById("load-btn").addEventListener("click", () => {
+  const url = document.getElementById("chapter-url").value.trim();
+  if (url) loadChapterByUrl(url);
 });
 
 document.getElementById("manual-load-btn").addEventListener("click", async () => {

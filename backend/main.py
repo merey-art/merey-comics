@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -137,6 +138,54 @@ def image_proxy(url: str = Query(...)) -> Response:
     return Response(content=content, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
 
 
+UNICOMICS_IMAGE_RE = re.compile(r"^(https?://[^/]+/.+/)(\d+)(\.\w+)$")
+
+
+def parse_unicomics(soup: BeautifulSoup, chapter_url: str) -> list[str]:
+    """unicomics.ru serves one page per URL (/comics/online/<slug>/<n>) with
+    images at .../<slug>/NN.jpg, so the full list is derived from the page
+    <select> (page count) and the current page's image URL (naming pattern)."""
+    options = [o.get("value") for o in soup.select("select option") if o.get("value")]
+    total = len(options)
+    if not total:
+        return []
+
+    for img in soup.select("img"):
+        src = urljoin(chapter_url, img.get("src") or "")
+        m = UNICOMICS_IMAGE_RE.match(src)
+        if m and "/comics/" in src:
+            prefix, digits, ext = m.groups()
+            return [f"{prefix}{i:0{len(digits)}d}{ext}" for i in range(1, total + 1)]
+    return []
+
+
+def unicomics_title(soup: BeautifulSoup) -> str:
+    title = soup.title.get_text(strip=True) if soup.title else ""
+    return re.split(r"\s+-\s+страница", title)[0] or "Без названия"
+
+
+def unicomics_next_issue(chapter_url: str, total: int, headers: dict) -> str | None:
+    """On the last page of an issue the "next" link (a.next-url) points at the
+    next issue instead of the next page."""
+    base = chapter_url.rstrip("/").rsplit("/", 1)[0]
+    if not re.fullmatch(r"\d+", chapter_url.rstrip("/").rsplit("/", 1)[-1]):
+        base = chapter_url.rstrip("/")
+    try:
+        resp = impersonate_requests.get(
+            f"{base}/{total}", headers=headers, impersonate="chrome120", timeout=REQUEST_TIMEOUT
+        )
+        resp.raise_for_status()
+    except impersonate_requests.RequestsError:
+        return None
+    link = BeautifulSoup(resp.text, "html.parser").select_one("a.next-url")
+    href = link.get("href") if link else None
+    if not href:
+        return None
+    next_url = urljoin(chapter_url, href)
+    # Still inside the same issue means there is no next issue.
+    return None if next_url.rstrip("/").startswith(base.rstrip("/") + "/") else next_url
+
+
 @app.post("/api/parse-chapter")
 def parse_chapter(payload: ParseChapterRequest) -> dict:
     chapter_url = str(payload.chapter_url)
@@ -159,6 +208,17 @@ def parse_chapter(payload: ParseChapterRequest) -> dict:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     page_urls: list[str] = []
+
+    if urlparse(chapter_url).hostname and urlparse(chapter_url).hostname.endswith("unicomics.ru"):
+        page_urls = parse_unicomics(soup, chapter_url)
+        if page_urls:
+            return {
+                "chapter_url": chapter_url,
+                "page_count": len(page_urls),
+                "pages": page_urls,
+                "title": unicomics_title(soup),
+                "next_url": unicomics_next_issue(chapter_url, len(page_urls), headers),
+            }
 
     for img in soup.select(".reader__item_wrap img"):
         src = img.get("data-src") or img.get("data-original") or img.get("src")
