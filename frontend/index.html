@@ -55,6 +55,14 @@
   <div class="w-full max-w-sm space-y-4">
     <h1 class="text-xl font-semibold text-center">Guided View</h1>
 
+    <div id="history-block" class="hidden space-y-2">
+      <button id="continue-btn"
+        class="w-full rounded-lg bg-white text-black font-medium py-2 text-sm active:scale-95 transition"></button>
+      <input id="history-search" type="search" placeholder="Поиск по истории"
+        class="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-400">
+      <ul id="history-list" class="max-h-64 overflow-y-auto space-y-1"></ul>
+    </div>
+
     <div class="grid grid-cols-3 gap-1 rounded-lg bg-neutral-900 p-1 text-xs">
       <button data-tab="api" class="tab-btn rounded-md py-2 font-medium transition">По ссылке</button>
       <button data-tab="manual" class="tab-btn rounded-md py-2 font-medium transition">Вручную</button>
@@ -140,6 +148,7 @@ const state = {
   panelData: null,
   panelIndex: 0,
   cache: new Map(),
+  meta: null,
 };
 
 const setupScreen = document.getElementById("setup-screen");
@@ -156,6 +165,84 @@ const progressBar = document.getElementById("progress-bar");
 const setupError = document.getElementById("setup-error");
 const readerError = document.getElementById("reader-error");
 const setupStatus = document.getElementById("setup-status");
+
+const HISTORY_KEY = "gv-history";
+const HISTORY_MAX = 100;
+
+function readHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeHistory(list) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+  } catch (_) {}
+}
+
+function saveProgress() {
+  const meta = state.meta;
+  if (!meta) return;
+  const entry = {
+    key: meta.url || state.pages[0],
+    title: meta.title,
+    url: meta.url,
+    pages: state.pages,
+    page: state.pageIndex,
+    ts: Date.now(),
+  };
+  writeHistory([entry, ...readHistory().filter((e) => e.key !== entry.key)]);
+}
+
+function renderHistory() {
+  const all = readHistory();
+  const block = document.getElementById("history-block");
+  block.classList.toggle("hidden", all.length === 0);
+  if (!all.length) return;
+
+  const cont = document.getElementById("continue-btn");
+  const last = all[0];
+  cont.textContent = `Продолжить: ${last.title} (стр. ${last.page + 1}/${last.pages.length})`;
+  cont.onclick = () => openEntry(last);
+
+  const q = document.getElementById("history-search").value.trim().toLowerCase();
+  const list = document.getElementById("history-list");
+  list.replaceChildren();
+  all
+    .filter((e) => !q || e.title.toLowerCase().includes(q))
+    .forEach((e) => {
+      const li = document.createElement("li");
+      li.className = "flex items-center gap-2 rounded-lg bg-neutral-900 px-3 py-2 text-sm";
+      const btn = document.createElement("button");
+      btn.className = "flex-1 text-left truncate";
+      btn.textContent = `${e.title} · ${e.page + 1}/${e.pages.length}`;
+      btn.onclick = () => openEntry(e);
+      li.append(btn);
+      if (e.url) {
+        const a = document.createElement("a");
+        a.href = e.url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.className = "text-neutral-400";
+        a.textContent = "↗";
+        li.append(a);
+      }
+      list.append(li);
+    });
+}
+
+async function openEntry(entry) {
+  setupError.classList.add("hidden");
+  try {
+    await startReader(entry.pages, { title: entry.title, url: entry.url }, entry.page);
+  } catch (err) {
+    showError(err.message);
+  }
+}
 
 function showLoading(show) {
   loading.classList.toggle("hidden", !show);
@@ -306,6 +393,7 @@ async function loadPage(pageIndex, panelIndex = 0) {
     await loadImageIntoView(data.image_url);
 
     drawCurrentPanel();
+    saveProgress();
   } catch (err) {
     showError(err.message);
   } finally {
@@ -383,9 +471,10 @@ function extractPagesFromManualInput(text) {
   return unique;
 }
 
-async function startReader(pages) {
+async function startReader(pages, meta = null, startPage = 0) {
   if (!pages || !pages.length) throw new Error("Список страниц пуст");
 
+  state.meta = meta && { title: meta.title || "Без названия", url: meta.url || "" };
   state.pages = pages;
   state.totalPages = pages.length;
 
@@ -394,7 +483,7 @@ async function startReader(pages) {
   topbar.classList.remove("hidden");
   hud.classList.remove("hidden");
 
-  await loadPage(0, 0);
+  await loadPage(Math.min(Math.max(startPage, 0), pages.length - 1), 0);
 }
 
 function initTabs() {
@@ -419,7 +508,7 @@ function initTabs() {
 
 function initBookmarklet() {
   const appOrigin = window.location.origin;
-  const code = `javascript:(function(){const appOrigin='${appOrigin}';let urls=[];try{const root=document.querySelector('.reader-root');const comp=root&&(root._vnode&&root._vnode.component);const imgs=comp&&comp.data&&comp.data.data&&comp.data.data.images;if(Array.isArray(imgs)&&imgs.length)urls=imgs.slice();}catch(e){}if(!urls.length){const selectOpts=Array.from(document.querySelectorAll('select option, .reader__select option'));selectOpts.forEach(o=>{const v=o.value||o.getAttribute('data-src');if(v&&v.includes('img.batcave.biz'))urls.push(v);});}if(!urls.length){for(let k in window){try{const v=window[k];if(Array.isArray(v)&&v.length>10&&typeof v[0]==='string'&&v[0].includes('img.batcave.biz')){urls=v;break;}}catch(e){}}}if(!urls.length){const scripts=Array.from(document.querySelectorAll('script')).map(s=>s.textContent).join('\\n');const matches=scripts.match(/https:\\/\\/img\\.batcave\\.biz\\/img\\/[^"'\\s]+/g);if(matches)urls=matches;}if(!urls.length){urls=Array.from(document.querySelectorAll('img.reader__item, .reader__item_wrap img')).map(i=>i.getAttribute('src')||i.getAttribute('data-src')||i.getAttribute('data-original')).filter(Boolean);}const unique=[...new Set(urls)].filter(u=>u.includes('img.batcave.biz'));if(unique.length){window.open(appOrigin+'/?pages='+encodeURIComponent(JSON.stringify(unique)),'_blank');}else{alert('Найдено страниц: '+unique.length+'. Проверь, открыта ли страница ридера.');}})();`;
+  const code = `javascript:(function(){const appOrigin='${appOrigin}';let urls=[];try{const root=document.querySelector('.reader-root');const comp=root&&(root._vnode&&root._vnode.component);const imgs=comp&&comp.data&&comp.data.data&&comp.data.data.images;if(Array.isArray(imgs)&&imgs.length)urls=imgs.slice();}catch(e){}if(!urls.length){const selectOpts=Array.from(document.querySelectorAll('select option, .reader__select option'));selectOpts.forEach(o=>{const v=o.value||o.getAttribute('data-src');if(v&&v.includes('img.batcave.biz'))urls.push(v);});}if(!urls.length){for(let k in window){try{const v=window[k];if(Array.isArray(v)&&v.length>10&&typeof v[0]==='string'&&v[0].includes('img.batcave.biz')){urls=v;break;}}catch(e){}}}if(!urls.length){const scripts=Array.from(document.querySelectorAll('script')).map(s=>s.textContent).join('\\n');const matches=scripts.match(/https:\\/\\/img\\.batcave\\.biz\\/img\\/[^"'\\s]+/g);if(matches)urls=matches;}if(!urls.length){urls=Array.from(document.querySelectorAll('img.reader__item, .reader__item_wrap img')).map(i=>i.getAttribute('src')||i.getAttribute('data-src')||i.getAttribute('data-original')).filter(Boolean);}const unique=[...new Set(urls)].filter(u=>u.includes('img.batcave.biz'));if(unique.length){window.open(appOrigin+'/?pages='+encodeURIComponent(JSON.stringify(unique))+'&title='+encodeURIComponent(document.title)+'&url='+encodeURIComponent(location.href),'_blank');}else{alert('Найдено страниц: '+unique.length+'. Проверь, открыта ли страница ридера.');}})();`;
 
   const link = document.getElementById("bookmarklet-link");
   link.href = code;
@@ -483,7 +572,13 @@ async function initFromUrlParams() {
   try {
     const pages = JSON.parse(pagesParam);
     if (!Array.isArray(pages) || !pages.length) throw new Error("Параметр pages пуст или некорректен");
-    await startReader(pages);
+    const url = params.get("url") || "";
+    const saved = readHistory().find((e) => url && e.key === url);
+    await startReader(
+      pages,
+      { title: params.get("title") || "Без названия", url },
+      saved ? saved.page : 0
+    );
     return true;
   } catch (err) {
     showError(`Ошибка чтения ?pages=: ${err.message}`);
@@ -493,6 +588,8 @@ async function initFromUrlParams() {
 
 initTabs();
 initBookmarklet();
+renderHistory();
+document.getElementById("history-search").addEventListener("input", renderHistory);
 initFromUrlParams();
 </script>
 </body>
